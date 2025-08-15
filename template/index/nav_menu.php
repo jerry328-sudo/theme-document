@@ -25,7 +25,7 @@ if ( has_nav_menu( 'top-leval' ) ) {
 
 	/* 是否显示白天黑夜模式切换 */
 	if ( nicen_theme_config( 'document_header_show_readmode', false ) ) {
-		$args['items_wrap'] = '<ul id="%1$s" class="%2$s"><li class="menu-item read-mode"><i class="iconfont icon-baitian-qing"></i></li>%3$s</ul>';
+		$args['items_wrap'] = '<ul id="%1$s" class="%2$s"><li class="menu-item read-mode"><i class="iconfont icon-baitian-qing"></i><span class="theme-mode-text" style="display: none;">Auto</span></li>%3$s</ul>';
 	} else {
 		$args['items_wrap'] = '<ul id="%1$s" class="%2$s">%3$s</ul>';
 	}

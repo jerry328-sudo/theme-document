@@ -141,9 +141,24 @@ html {
           /*
             阅读模式图标
           */
-          .read-mode .iconfont {
-            color: inherit;
-            font-size: var(--theme-text);
+          .read-mode {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: 2rem;
+            
+            .iconfont {
+              color: inherit;
+              font-size: var(--theme-text);
+            }
+            
+            .theme-mode-text {
+              font-size: 0.85rem;
+              color: inherit;
+              white-space: nowrap;
+              font-weight: 500;
+            }
           }
 
           /*

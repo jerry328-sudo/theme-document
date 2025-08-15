@@ -61,13 +61,18 @@ $(function ($) {
 
 
         /*
-        * 阅读模式切换（白天、黑暗）
+        * 主题模式切换（白天、夜间、自动）
         * */
         $('.read-mode').click(function () {
-            if ($(this).find('i').hasClass("icon-yueliang")) {
-                toggleTheme(false); //切换白天模式
+            const currentMode = localStorage.getItem('theme-mode') || 'auto';
+            
+            // 三态循环：自动 -> 白天 -> 夜间 -> 自动
+            if (currentMode === 'auto') {
+                toggleTheme('light');
+            } else if (currentMode === 'light') {
+                toggleTheme('dark');
             } else {
-                toggleTheme(true); //切换暗黑模式
+                toggleTheme('auto');
             }
         });
 

@@ -475,9 +475,20 @@ html {
           /*
             如果拥有子菜单
           */ }
-          html body .main-header .right .menu .read-mode .iconfont {
-            color: inherit;
-            font-size: var(--theme-text); }
+          html body .main-header .right .menu .read-mode {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: 2rem; }
+            html body .main-header .right .menu .read-mode .iconfont {
+              color: inherit;
+              font-size: var(--theme-text); }
+            html body .main-header .right .menu .read-mode .theme-mode-text {
+              font-size: 0.85rem;
+              color: inherit;
+              white-space: nowrap;
+              font-weight: 500; }
           html body .main-header .right .menu .menu-item-has-children > a {
             font-family: "iconfont" !important;
             font-style: normal;

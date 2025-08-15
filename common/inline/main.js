@@ -1,34 +1,80 @@
 /*
 * 切换主题皮肤
+* mode: 'light' | 'dark' | 'auto'
 * */
-function toggleTheme(flag = true) {
-    if (flag) {
+function toggleTheme(mode = 'auto') {
+    if (mode === 'dark') {
         //暗黑主题
         $('html')
             .addClass('dark')
             .removeClass('personal');
         //标记暗黑模式
-        localStorage.setItem('night', 1);
-        //改变图标
+        localStorage.setItem('theme-mode', 'dark');
+        //改变图标和文字
         $(function () {
             $('.read-mode i')
-                .removeClass("icon-baitian-qing")
-                .addClass("icon-yueliang");
+                .removeClass("icon-baitian-qing icon-shezhi1")
+                .addClass("icon-yueliang")
+                .show();
+            $('.read-mode .theme-mode-text').hide();
         });
-    } else {
-        //暗黑主题
+    } else if (mode === 'light') {
+        //白天主题
         $('html')
             .removeClass('dark')
             .addClass('personal');
-        //移除暗黑模式标记
-        localStorage.removeItem('night');
-        //改变图标
+        //标记白天模式
+        localStorage.setItem('theme-mode', 'light');
+        //改变图标和文字
         $(function () {
             $('.read-mode i')
-                .removeClass("icon-yueliang")
-                .addClass("icon-baitian-qing");
+                .removeClass("icon-yueliang icon-shezhi1")
+                .addClass("icon-baitian-qing")
+                .show();
+            $('.read-mode .theme-mode-text').hide();
         });
+    } else {
+        //自动跟随系统
+        localStorage.setItem('theme-mode', 'auto');
+        //改变图标和文字
+        $(function () {
+            $('.read-mode i')
+                .removeClass("icon-yueliang icon-baitian-qing icon-shezhi1")
+                .hide();
+            $('.read-mode .theme-mode-text').text('Auto').show();
+        });
+        //应用系统主题
+        applySystemTheme();
     }
+}
+
+/*
+* 应用系统主题
+* */
+function applySystemTheme() {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        //系统是暗色模式
+        $('html')
+            .addClass('dark')
+            .removeClass('personal');
+    } else {
+        //系统是亮色模式
+        $('html')
+            .removeClass('dark')
+            .addClass('personal');
+    }
+}
+
+/*
+* 监听系统主题变化
+* */
+if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+        const themeMode = localStorage.getItem('theme-mode');
+        if (themeMode === 'auto') {
+            applySystemTheme();
+        }
+    });
 }
 
 
@@ -47,15 +93,28 @@ let theme = localStorage.getItem('theme-color');
 if (!!theme) {
     $('html').addClass(theme)
 }
-/*同步阅读模式 */
-let night = localStorage.getItem('night');
+
+/*同步主题模式 */
+let themeMode = localStorage.getItem('theme-mode');
+
+// 兼容旧版本的 'night' 存储方式
+let oldNight = localStorage.getItem('night');
+if (!!oldNight && !themeMode) {
+    themeMode = 'dark';
+    localStorage.setItem('theme-mode', 'dark');
+    localStorage.removeItem('night');
+}
+
+// 如果没有设置过模式，默认为自动跟随系统
+if (!themeMode) {
+    themeMode = 'auto';
+    localStorage.setItem('theme-mode', 'auto');
+}
 
 /*
-* 是否需要切换模式
+* 初始化主题模式
 * */
-if (!!night) {
-    toggleTheme(true); //切换暗黑
-}
+toggleTheme(themeMode);
 
 /*
 * 获取元素在网页的实际top
