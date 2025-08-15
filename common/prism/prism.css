@@ -1,5 +1,5 @@
 /* PrismJS 1.29.0
-https://prismjs.com/download.html#themes=prism&languages=markup+css+clike+javascript+bash+c+csharp+cpp+css-extras+docker+git+go+http+icon+ini+java+javadoclike+jq+js-extras+json+json5+markdown+markup-templating+nginx+php+phpdoc+php-extras+plsql+python+sql+typescript+visual-basic&plugins=line-highlight+line-numbers+highlight-keywords+remove-initial-line-feed+inline-color+toolbar+copy-to-clipboard */
+https://prismjs.com/download.html#themes=prism&languages=markup+css+clike+javascript+bash+c+csharp+cpp+css-extras+docker+git+go+http+icon+ini+java+javadoclike+jq+js-extras+json+json5+markdown+markup-templating+nginx+php+phpdoc+php-extras+plsql+powershell+python+sql+typescript+visual-basic&plugins=line-highlight+line-numbers+highlight-keywords+remove-initial-line-feed+inline-color+toolbar+copy-to-clipboard */
 code[class*=language-], pre[class*=language-] {
     color: var(--theme-pre, #000);
     background: 0 0;
