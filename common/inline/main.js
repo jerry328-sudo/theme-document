@@ -75,6 +75,14 @@ if (window.matchMedia) {
             applySystemTheme();
         }
     });
+let systemThemeChangeListener = function(e) {
+    const themeMode = localStorage.getItem('theme-mode');
+    if (themeMode === 'auto') {
+        applySystemTheme();
+    }
+};
+if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', systemThemeChangeListener);
 }
 
 
