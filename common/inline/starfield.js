@@ -16,7 +16,7 @@
   let width = 0, height = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
 
   // Configs
-  const STAR_DENSITY = 0.12; // stars per 1000 px^2
+  const STAR_DENSITY = 0.12; // stars per 1000 px^2 (dark mode only)
   const LAYERS = [
     { speed: 0.02, size: [0.4, 0.9], alpha: [0.35, 0.7] },
     { speed: 0.05, size: [0.6, 1.2], alpha: [0.45, 0.85] },
@@ -29,6 +29,10 @@
   const rand = (a, b) => a + Math.random() * (b - a);
   const choice = arr => arr[(Math.random() * arr.length) | 0];
 
+  // Theme mode detection: dark vs light
+  const root = document.documentElement;
+  let isDark = root.classList.contains('dark');
+
   function resize() {
     width = window.innerWidth;
     height = window.innerHeight;
@@ -37,14 +41,15 @@
     canvas.style.width = width + 'px';
     canvas.style.height = height + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    spawnStars();
+    if (isDark) spawnStars();
   }
 
   // Star entity
   let stars = [];
   function spawnStars() {
     const areaK = (width * height) / 1000;
-    const target = Math.max(80, Math.floor(areaK * STAR_DENSITY));
+    const density = isDark ? STAR_DENSITY : 0; // no stars in light mode
+    const target = Math.max(0, Math.floor(areaK * density));
     stars = [];
     for (let i = 0; i < target; i++) {
       const layer = choice(LAYERS);
@@ -76,11 +81,16 @@
 
   function drawBackground() {
     // Subtle vertical gradient for depth
-    const g = ctx.createLinearGradient(0, 0, 0, height);
-    g.addColorStop(0, 'rgba(0, 10, 20, 1)');
-    g.addColorStop(1, 'rgba(0, 0, 0, 1)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, width, height);
+    if (isDark) {
+      const g = ctx.createLinearGradient(0, 0, 0, height);
+      g.addColorStop(0, 'rgba(0, 10, 20, 1)');
+      g.addColorStop(1, 'rgba(0, 0, 0, 1)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+    } else {
+      // In light mode, we don't paint anything; keep fully transparent
+      ctx.clearRect(0, 0, width, height);
+    }
   }
 
   function drawStars() {
@@ -144,10 +154,11 @@
   let rafId = 0;
   function frame() {
     drawBackground();
-    drawStars();
-    drawMeteors();
-    // random spawn
-    if (Math.random() < SHOOTING_STAR_RATE) spawnMeteor();
+    if (isDark) {
+      drawStars();
+      drawMeteors();
+      if (Math.random() < SHOOTING_STAR_RATE) spawnMeteor();
+    }
     rafId = window.requestAnimationFrame(frame);
   }
 
@@ -163,10 +174,33 @@
     rafId = 0;
   }
 
-  window.addEventListener('resize', resize, { passive: true });
-  media.addEventListener ? media.addEventListener('change', () => (media.matches ? cancel() : start())) : media.addListener(() => (media.matches ? cancel() : start()));
+  // Observe theme mode changes by watching html.class changes
+  const mo = new MutationObserver(() => {
+    applyMode();
+  });
+  mo.observe(root, { attributes: true, attributeFilter: ['class'] });
 
+  function applyMode() {
+    const wasDark = isDark;
+    isDark = root.classList.contains('dark');
+    if (!isDark || media.matches) {
+      // Light mode or reduced motion: hide canvas and stop animating
+      canvas.style.display = 'none';
+      cancel();
+      ctx.clearRect(0, 0, width, height);
+      return;
+    }
+    // Dark mode: show and ensure sized + stars
+    canvas.style.display = 'block';
+    resize();
+    if (!rafId) start();
+  }
+
+  window.addEventListener('resize', () => { if (isDark) resize(); }, { passive: true });
+  const onReduceChange = () => applyMode();
+  media.addEventListener ? media.addEventListener('change', onReduceChange) : media.addListener(onReduceChange);
+
+  // Initialize mode and sizing
   resize();
-  start();
+  applyMode();
 })();
-
