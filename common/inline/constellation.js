@@ -96,11 +96,16 @@
     mouse.active = true;
   }
   window.addEventListener('mousemove', setMouse, { passive: true });
-  window.addEventListener('mouseenter', () => (mouse.active = true));
-  window.addEventListener('mouseleave', () => (mouse.active = false));
+  window.addEventListener('mouseenter', () => (mouse.active = true), { passive: true });
+  window.addEventListener('mouseleave', () => (mouse.active = false), { passive: true });
+  // 更可靠的离开检测：当 relatedTarget 为空时，表示鼠标离开了页面
+  window.addEventListener('mouseout', (e) => { if (!e.relatedTarget && !e.toElement) mouse.active = false; }, { passive: true });
+  document.addEventListener('mouseleave', () => (mouse.active = false), { passive: true });
+  window.addEventListener('blur', () => (mouse.active = false));
   window.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
   window.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
   window.addEventListener('touchend', () => (mouse.active = false));
+  window.addEventListener('touchcancel', () => (mouse.active = false));
 
   // Grid for neighborhood search（复用内存，减少 GC）
   let cellSize = CONFIG.linkDistance;
