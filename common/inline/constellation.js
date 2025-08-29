@@ -19,18 +19,20 @@
 
   // Config
   const CONFIG = {
-    density: 0.00012,     // particles per pixel^2
+    density: 0.00002,     // particles per pixel^2
     maxCount: 260,
     minCount: 80,
     dotRadius: [1.0, 2.0],
     maxSpeed: 0.35,
+    minSpeed: 0.2,        // 速度下限，防止完全停滞
+    damping: 0.03,         // 速度阻尼（每帧按 dt 衰减）
     linkDistance: 120,
     linkWidth: 0.8,
     linkOpacity: 0.7,
     drawMouseLinks: true,
     hoverRadius: 160,
     attractStrength: 0.0012,
-    dotColor: 'rgba(255,255,255,0.9)',
+    dotColor: 'rgba(255,255,255,1)',
     lineColor: [255, 255, 255],
     twinkle: true,
     twinkleAmplitude: 0.35
@@ -122,10 +124,35 @@
     const hr2 = CONFIG.hoverRadius * CONFIG.hoverRadius;
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
+
+      // 鼠标吸引（加速度）
       if (mouse.active) {
         const dx = mouse.x - p.x; const dy = mouse.y - p.y; const d2 = dx * dx + dy * dy;
-        if (d2 < hr2 && d2 > 0.001) { const a = CONFIG.attractStrength; p.vx += dx * a * dt; p.vy += dy * a * dt; }
+        if (d2 < hr2 && d2 > 0.001) {
+          const a = CONFIG.attractStrength;
+          p.vx += dx * a * dt; p.vy += dy * a * dt;
+        }
       }
+
+      // 速度阻尼（指数衰减）
+      const damp = Math.max(0, 1 - CONFIG.damping * dt);
+      p.vx *= damp; p.vy *= damp;
+
+      // 速度阈值控制：限制上限，抬升下限
+      let sp = Math.hypot(p.vx, p.vy);
+      if (sp > CONFIG.maxSpeed) {
+        const k = CONFIG.maxSpeed / sp; p.vx *= k; p.vy *= k; sp = CONFIG.maxSpeed;
+      } else if (sp < CONFIG.minSpeed) {
+        // 若几乎静止，则赋予一个随机的微弱方向速度
+        if (sp < 1e-4) {
+          const ang = Math.random() * Math.PI * 2;
+          p.vx = Math.cos(ang) * CONFIG.minSpeed; p.vy = Math.sin(ang) * CONFIG.minSpeed;
+        } else {
+          const k = CONFIG.minSpeed / sp; p.vx *= k; p.vy *= k;
+        }
+      }
+
+      // 位置更新
       p.x += p.vx * dt; p.y += p.vy * dt;
       if (p.x < 0) { p.x = 0; p.vx *= -1; } else if (p.x > window.innerWidth) { p.x = window.innerWidth; p.vx *= -1; }
       if (p.y < 0) { p.y = 0; p.vy *= -1; } else if (p.y > window.innerHeight) { p.y = window.innerHeight; p.vy *= -1; }
