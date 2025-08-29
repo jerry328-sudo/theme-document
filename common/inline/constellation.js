@@ -19,19 +19,22 @@
 
   // Config
   const CONFIG = {
-    density: 0.00002,     // particles per pixel^2
+    density: 0.00005,     // particles per pixel^2
     maxCount: 260,
     minCount: 80,
     dotRadius: [1.0, 2.0],
     maxSpeed: 0.35,
     minSpeed: 0.2,        // 速度下限，防止完全停滞
-    damping: 0.03,         // 速度阻尼（每帧按 dt 衰减）
+    damping: 0.01,         // 速度阻尼（每帧按 dt 衰减）
     linkDistance: 120,
     linkWidth: 0.8,
     linkOpacity: 0.7,
     drawMouseLinks: true,
     hoverRadius: 160,
-    attractStrength: 0.0012,
+    attractStrength: 0.005, // 鼠标吸引强度（加速度）
+    // 近距离互斥（相互排斥），只在非常接近时生效
+    repelDistance: 22,       // px
+    repelStrength: 0.006,    // 排斥强度
     dotColor: 'rgba(255,255,255,1)',
     lineColor: [255, 255, 255],
     twinkle: true,
@@ -119,6 +122,45 @@
     lastTime = now;
 
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+    // 近距离排斥：对非常接近的粒子施加对称的分离冲量
+    (function applyRepulsion() {
+      const R = CONFIG.repelDistance; const R2 = R * R;
+      const { grid, cols, rows } = buildGrid();
+      // 半平面邻域以避免重复；(0,0)格用 i<j
+      const OFFS = [ [0,0], [1,0], [0,1], [1,1], [1,-1] ];
+      for (let cy = 0; cy < rows; cy++) {
+        for (let cx = 0; cx < cols; cx++) {
+          const bucket = grid[cy * cols + cx];
+          if (!bucket) continue;
+          for (let k = 0; k < OFFS.length; k++) {
+            const nx = cx + OFFS[k][0]; const ny = cy + OFFS[k][1];
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+            const nb = grid[ny * cols + nx]; if (!nb) continue;
+            if (OFFS[k][0] === 0 && OFFS[k][1] === 0) {
+              for (let i = 0; i < bucket.length; i++) {
+                for (let j = i + 1; j < bucket.length; j++) repelPair(particles[bucket[i]], particles[bucket[j]]);
+              }
+            } else {
+              for (let i = 0; i < bucket.length; i++) {
+                for (let j = 0; j < nb.length; j++) repelPair(particles[bucket[i]], particles[nb[j]]);
+              }
+            }
+          }
+        }
+      }
+      function repelPair(a, b) {
+        const dx = b.x - a.x; const dy = b.y - a.y; const d2 = dx*dx + dy*dy;
+        if (d2 <= 1e-6 || d2 > R2) return;
+        const d = Math.sqrt(d2);
+        // 线性随距离减弱，越近排斥越强
+        const s = (1 - d / R) * CONFIG.repelStrength * dt;
+        const ux = dx / d, uy = dy / d;
+        // 对称相反方向
+        a.vx -= ux * s; a.vy -= uy * s;
+        b.vx += ux * s; b.vy += uy * s;
+      }
+    })();
 
     // Physics + attraction
     const hr2 = CONFIG.hoverRadius * CONFIG.hoverRadius;
