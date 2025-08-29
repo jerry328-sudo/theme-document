@@ -38,7 +38,25 @@
     dotColor: 'rgba(255,255,255,1)',
     lineColor: [255, 255, 255],
     twinkle: true,
-    twinkleAmplitude: 0.35
+    twinkleAmplitude: 0.35,
+    // 线段型尾巴（已默认关闭，保留作为备选）
+    trailEnabled: false,
+    trailFadeTime: 700,
+    trailMaxPoints: 48,
+    trailMinDist: 3,
+    trailWidth: 7,
+    trailOpacity: 0.75,
+    // 粒子型彗星尾巴（默认开启）
+    cometEnabled: true,
+    cometSpawnDist: 4,         // 鼠标移动每隔多少像素生成一个粒子
+    cometLife: 800,            // 单个尾巴粒子寿命（ms）
+    cometLifeJitter: 250,      // 寿命抖动（±ms）
+    cometSize: [0.6, 1.6],     // 尾巴粒子半径范围
+    cometSpeedScale: 0.12,     // 初速度与移动距离的比例（越大越拖尾）
+    cometJitter: 0.25,         // 初速度随机抖动比例
+    cometDamping: 0.04,        // 速度阻尼
+    cometOpacity: 0.9,         // 最高不透明度
+    cometMaxCount: 500         // 尾巴粒子最大数量（防止过多导致卡顿）
   };
 
   // 常量与可复用结构（避免每帧创建临时对象）
@@ -88,18 +106,40 @@
   }
 
   // Mouse / touch
-  const mouse = { x: 0, y: 0, active: false };
+  const mouse = { x: 0, y: 0, active: false, dragging: false };
+  const mouseTrail = []; // 线段尾巴 {x,y,t}
+  const cometParticles = []; // 粒子尾巴 {x,y,vx,vy,life,lifeMax,r}
+  const lastMouse = { x: 0, y: 0, has: false };
+  function clearTrail() { mouseTrail.length = 0; }
+  function clearComet() { cometParticles.length = 0; }
   function deactivateMouse() {
     mouse.active = false;
+    mouse.dragging = false;
     // 将坐标移到极远处，避免边缘残留吸引/连线
     mouse.x = -999999;
     mouse.y = -999999;
+    clearTrail();
+    // 粒子尾巴不立即清空，保留自然淡出；但重置参考点
+    lastMouse.has = false;
   }
   function setMouse(e) {
     const rect = canvas.getBoundingClientRect();
     mouse.x = e.clientX - rect.left;
     mouse.y = e.clientY - rect.top;
     mouse.active = true;
+    if (mouse.dragging && CONFIG.trailEnabled) addTrailPoint(mouse.x, mouse.y);
+    if (CONFIG.cometEnabled) addCometFromMove(mouse.x, mouse.y);
+  }
+  function addTrailPoint(x, y) {
+    const now = performance.now();
+    const n = mouseTrail.length;
+    if (n > 0) {
+      const lp = mouseTrail[n - 1];
+      const dx = x - lp.x, dy = y - lp.y;
+      if (dx * dx + dy * dy < CONFIG.trailMinDist * CONFIG.trailMinDist) return;
+    }
+    mouseTrail.push({ x, y, t: now });
+    if (mouseTrail.length > CONFIG.trailMaxPoints) mouseTrail.shift();
   }
   window.addEventListener('mousemove', setMouse, { passive: true });
   window.addEventListener('mouseenter', () => (mouse.active = true), { passive: true });
@@ -110,11 +150,47 @@
   // 指针事件，进一步增强跨浏览器一致性
   document.addEventListener('pointerleave', deactivateMouse, { passive: true });
   window.addEventListener('pointerout', (e) => { if (!e.relatedTarget) deactivateMouse(); }, { passive: true });
+  document.addEventListener('pointerdown', (e) => { setMouse(e); mouse.dragging = true; addTrailPoint(mouse.x, mouse.y); }, { passive: true });
+  document.addEventListener('pointerup', () => { mouse.dragging = false; }, { passive: true });
+  // 兼容不支持 Pointer Events 的浏览器
+  document.addEventListener('mousedown', (e) => { setMouse(e); mouse.dragging = true; addTrailPoint(mouse.x, mouse.y); }, { passive: true });
+  document.addEventListener('mouseup', () => { mouse.dragging = false; }, { passive: true });
   window.addEventListener('blur', deactivateMouse);
-  window.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
+  window.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) { mouse.dragging = true; setMouse(t); addTrailPoint(mouse.x, mouse.y); } }, { passive: true });
   window.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
-  window.addEventListener('touchend', deactivateMouse);
-  window.addEventListener('touchcancel', deactivateMouse);
+  window.addEventListener('touchend', () => { mouse.dragging = false; deactivateMouse(); });
+  window.addEventListener('touchcancel', () => { mouse.dragging = false; deactivateMouse(); });
+
+  // Comet particle helpers
+  function randRange(a, b) { return Math.random() * (b - a) + a; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function addCometFromMove(x, y) {
+    const now = performance.now();
+    if (!lastMouse.has) { lastMouse.x = x; lastMouse.y = y; lastMouse.has = true; return; }
+    const dx = x - lastMouse.x; const dy = y - lastMouse.y; const dist = Math.hypot(dx, dy);
+    if (dist <= 0.0001) return;
+    const steps = Math.max(1, Math.floor(dist / CONFIG.cometSpawnDist));
+    const ux = dx / dist, uy = dy / dist;
+    for (let i = 1; i <= steps; i++) {
+      const px = lerp(lastMouse.x, x, i / steps);
+      const py = lerp(lastMouse.y, y, i / steps);
+      // 速度与移动方向相反，使粒子跟随拖尾
+      const baseV = Math.min(60, dist) * CONFIG.cometSpeedScale; // 基于本次位移，限制上限
+      const jx = (Math.random() - 0.5) * 2 * CONFIG.cometJitter * baseV;
+      const jy = (Math.random() - 0.5) * 2 * CONFIG.cometJitter * baseV;
+      const vx = -ux * baseV + jx;
+      const vy = -uy * baseV + jy;
+      const lifeMax = Math.max(200, CONFIG.cometLife + randRange(-CONFIG.cometLifeJitter, CONFIG.cometLifeJitter));
+      const r = randRange(CONFIG.cometSize[0], CONFIG.cometSize[1]);
+      cometParticles.push({ x: px, y: py, vx, vy, life: lifeMax, lifeMax, r });
+    }
+    // 控制上限
+    if (cometParticles.length > CONFIG.cometMaxCount) {
+      const overflow = cometParticles.length - CONFIG.cometMaxCount;
+      cometParticles.splice(0, overflow);
+    }
+    lastMouse.x = x; lastMouse.y = y; lastMouse.has = true;
+  }
 
   // Grid for neighborhood search（复用内存，减少 GC）
   let cellSize = CONFIG.linkDistance;
@@ -293,6 +369,69 @@
       const dotA = (0.75 + 0.25 * alpha).toFixed(3);
       ctx.fillStyle = `rgba(255,255,255,${dotA})`;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Mouse comet trail (line-based, optional)
+    if (CONFIG.trailEnabled && mouseTrail.length > 1) {
+      // 移除过期点
+      const expire = now - CONFIG.trailFadeTime;
+      let startIdx = -1;
+      for (let i = 0; i < mouseTrail.length; i++) { if (mouseTrail[i].t >= expire) { startIdx = i; break; } }
+      if (startIdx === -1) {
+        // 全部过期
+        clearTrail();
+      } else if (startIdx > 0) {
+        mouseTrail.splice(0, startIdx);
+      }
+
+      // 绘制分段线，宽度与透明度随时间与顺序衰减
+      const n = mouseTrail.length;
+      if (n > 1) {
+        const rgb = CONFIG.lineColor || [255, 255, 255];
+        const prevCap = ctx.lineCap; ctx.lineCap = 'round';
+        for (let i = 1; i < n; i++) {
+          const p0 = mouseTrail[i - 1];
+          const p1 = mouseTrail[i];
+          const age = Math.max(0, now - p1.t);
+          const k = 1 - Math.min(1, age / CONFIG.trailFadeTime); // 0..1
+          const ease = k * k; // quadratic ease-out
+          const alpha = Math.max(0, ease * CONFIG.trailOpacity);
+          const width = Math.max(1, CONFIG.trailWidth * (0.3 + 0.7 * ease));
+          ctx.strokeStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
+          ctx.lineWidth = width;
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p1.y);
+          ctx.stroke();
+        }
+        ctx.lineCap = prevCap;
+      }
+    }
+
+    // Comet particles (glowing, without press)
+    if (CONFIG.cometEnabled && cometParticles.length > 0) {
+      const rgb = CONFIG.lineColor || [255, 255, 255];
+      const damp = Math.max(0, 1 - CONFIG.cometDamping * dt);
+      const dms = dt * (1000 / 60);
+      const prevComp = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = cometParticles.length - 1; i >= 0; i--) {
+        const p = cometParticles[i];
+        // 物理更新
+        p.vx *= damp; p.vy *= damp;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        p.life -= dms;
+        if (p.life <= 0) { cometParticles.splice(i, 1); continue; }
+        // 绘制
+        const k = p.life / p.lifeMax; // 0..1
+        const alpha = Math.max(0, k * CONFIG.cometOpacity);
+        const rr = Math.max(0.5, p.r * (0.4 + 0.6 * k));
+        ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, rr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = prevComp;
     }
   }
 
