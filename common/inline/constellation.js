@@ -23,8 +23,8 @@
     maxCount: 260,
     minCount: 80,
     dotRadius: [1.0, 2.0],
-    maxSpeed: 0.35,
-    minSpeed: 0.2,        // 速度下限，防止完全停滞
+    maxSpeed: 1,
+    minSpeed: 0.3,        // 速度下限，防止完全停滞
     damping: 0.01,         // 速度阻尼（每帧按 dt 衰减）
     linkDistance: 120,
     linkWidth: 0.8,
@@ -33,7 +33,7 @@
     hoverRadius: 160,
     attractStrength: 0.005, // 鼠标吸引强度（加速度）
     // 近距离互斥（相互排斥），只在非常接近时生效
-    repelDistance: 22,       // px
+    repelDistance: 40,       // px
     repelStrength: 0.006,    // 排斥强度
     dotColor: 'rgba(255,255,255,1)',
     lineColor: [255, 255, 255],
