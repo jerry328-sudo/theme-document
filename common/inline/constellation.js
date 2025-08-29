@@ -89,6 +89,12 @@
 
   // Mouse / touch
   const mouse = { x: 0, y: 0, active: false };
+  function deactivateMouse() {
+    mouse.active = false;
+    // 将坐标移到极远处，避免边缘残留吸引/连线
+    mouse.x = -999999;
+    mouse.y = -999999;
+  }
   function setMouse(e) {
     const rect = canvas.getBoundingClientRect();
     mouse.x = e.clientX - rect.left;
@@ -97,15 +103,18 @@
   }
   window.addEventListener('mousemove', setMouse, { passive: true });
   window.addEventListener('mouseenter', () => (mouse.active = true), { passive: true });
-  window.addEventListener('mouseleave', () => (mouse.active = false), { passive: true });
+  window.addEventListener('mouseleave', deactivateMouse, { passive: true });
   // 更可靠的离开检测：当 relatedTarget 为空时，表示鼠标离开了页面
-  window.addEventListener('mouseout', (e) => { if (!e.relatedTarget && !e.toElement) mouse.active = false; }, { passive: true });
-  document.addEventListener('mouseleave', () => (mouse.active = false), { passive: true });
-  window.addEventListener('blur', () => (mouse.active = false));
+  window.addEventListener('mouseout', (e) => { if (!e.relatedTarget && !e.toElement) deactivateMouse(); }, { passive: true });
+  document.addEventListener('mouseleave', deactivateMouse, { passive: true });
+  // 指针事件，进一步增强跨浏览器一致性
+  document.addEventListener('pointerleave', deactivateMouse, { passive: true });
+  window.addEventListener('pointerout', (e) => { if (!e.relatedTarget) deactivateMouse(); }, { passive: true });
+  window.addEventListener('blur', deactivateMouse);
   window.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
   window.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
-  window.addEventListener('touchend', () => (mouse.active = false));
-  window.addEventListener('touchcancel', () => (mouse.active = false));
+  window.addEventListener('touchend', deactivateMouse);
+  window.addEventListener('touchcancel', deactivateMouse);
 
   // Grid for neighborhood search（复用内存，减少 GC）
   let cellSize = CONFIG.linkDistance;
