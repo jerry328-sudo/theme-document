@@ -41,6 +41,12 @@
     twinkleAmplitude: 0.35
   };
 
+  // 常量与可复用结构（避免每帧创建临时对象）
+  const NEIGHBOR_OFFS = [ [0,0], [1,0], [0,1], [1,1], [1,-1] ];
+  const LINK_BIN_COUNT = 16; // 连线透明度量化桶数（批量描边）
+  const linkBins = Array.from({ length: LINK_BIN_COUNT }, () => []); // 每桶存放 [x1,y1,x2,y2,...]
+  const BASE_STROKE = `rgb(${CONFIG.lineColor[0]},${CONFIG.lineColor[1]},${CONFIG.lineColor[2]})`;
+
   let isDark = root.classList.contains('dark');
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let targetCount = 0;
@@ -96,19 +102,27 @@
   window.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) setMouse(t); }, { passive: true });
   window.addEventListener('touchend', () => (mouse.active = false));
 
-  // Grid for neighborhood search
+  // Grid for neighborhood search（复用内存，减少 GC）
   let cellSize = CONFIG.linkDistance;
+  let grid = [];
+  let gridCols = 0, gridRows = 0, gridCellSize = 0;
   function buildGrid() {
     cellSize = CONFIG.linkDistance;
     const cols = Math.ceil(window.innerWidth / cellSize);
     const rows = Math.ceil(window.innerHeight / cellSize);
-    const grid = new Array(cols * rows);
+    if (cols !== gridCols || rows !== gridRows || gridCellSize !== cellSize || grid.length !== cols * rows) {
+      gridCols = cols; gridRows = rows; gridCellSize = cellSize;
+      grid = new Array(cols * rows);
+      for (let i = 0; i < grid.length; i++) grid[i] = [];
+    } else {
+      for (let i = 0; i < grid.length; i++) grid[i].length = 0;
+    }
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
-      const cx = Math.max(0, Math.min(cols - 1, (p.x / cellSize) | 0));
-      const cy = Math.max(0, Math.min(rows - 1, (p.y / cellSize) | 0));
-      const idx = cy * cols + cx;
-      (grid[idx] || (grid[idx] = [])).push(i);
+      let cx = (p.x / cellSize) | 0; let cy = (p.y / cellSize) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+      grid[cy * cols + cx].push(i);
     }
     return { grid, cols, rows };
   }
@@ -128,16 +142,15 @@
       const R = CONFIG.repelDistance; const R2 = R * R;
       const { grid, cols, rows } = buildGrid();
       // 半平面邻域以避免重复；(0,0)格用 i<j
-      const OFFS = [ [0,0], [1,0], [0,1], [1,1], [1,-1] ];
       for (let cy = 0; cy < rows; cy++) {
         for (let cx = 0; cx < cols; cx++) {
           const bucket = grid[cy * cols + cx];
           if (!bucket) continue;
-          for (let k = 0; k < OFFS.length; k++) {
-            const nx = cx + OFFS[k][0]; const ny = cy + OFFS[k][1];
+          for (let k = 0; k < NEIGHBOR_OFFS.length; k++) {
+            const nx = cx + NEIGHBOR_OFFS[k][0]; const ny = cy + NEIGHBOR_OFFS[k][1];
             if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
             const nb = grid[ny * cols + nx]; if (!nb) continue;
-            if (OFFS[k][0] === 0 && OFFS[k][1] === 0) {
+            if (NEIGHBOR_OFFS[k][0] === 0 && NEIGHBOR_OFFS[k][1] === 0) {
               for (let i = 0; i < bucket.length; i++) {
                 for (let j = i + 1; j < bucket.length; j++) repelPair(particles[bucket[i]], particles[bucket[j]]);
               }
@@ -200,53 +213,71 @@
       if (p.y < 0) { p.y = 0; p.vy *= -1; } else if (p.y > window.innerHeight) { p.y = window.innerHeight; p.vy *= -1; }
     }
 
-    // Linking using grid
-    const { grid, cols, rows } = buildGrid();
+    // Linking using grid（复用一次网格，按透明度分桶后批量描边）
+    const { grid: grid2, cols, rows } = buildGrid();
     const maxD = CONFIG.linkDistance; const maxD2 = maxD * maxD;
-    const [lr, lg, lb] = CONFIG.lineColor; ctx.lineWidth = CONFIG.linkWidth;
+    for (let b = 0; b < LINK_BIN_COUNT; b++) linkBins[b].length = 0;
 
-    function drawLink(a, b) {
+    function addLink(a, b, opacityScale) {
       const dx = a.x - b.x; const dy = a.y - b.y; const d2 = dx * dx + dy * dy; if (d2 > maxD2) return;
-      const d = Math.sqrt(d2); const alpha = (1 - d / maxD) * CONFIG.linkOpacity;
-      ctx.strokeStyle = `rgba(${lr},${lg},${lb},${alpha.toFixed(3)})`;
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      const d = Math.sqrt(d2);
+      const alpha = (1 - d / maxD) * CONFIG.linkOpacity * opacityScale;
+      if (alpha <= 0) return;
+      const bi = Math.min(LINK_BIN_COUNT - 1, ((alpha / CONFIG.linkOpacity) * (LINK_BIN_COUNT - 1)) | 0);
+      const segs = linkBins[bi];
+      segs.push(a.x, a.y, b.x, b.y);
     }
 
     for (let cy = 0; cy < rows; cy++) {
       for (let cx = 0; cx < cols; cx++) {
-        const cellIdx = cy * cols + cx; const bucket = grid[cellIdx]; if (!bucket) continue;
-        // within-cell pairs
+        const bucket = grid2[cy * cols + cx]; if (!bucket) continue;
+        // 同格内两两组合
         for (let ii = 0; ii < bucket.length; ii++) {
-          for (let jj = ii + 1; jj < bucket.length; jj++) drawLink(particles[bucket[ii]], particles[bucket[jj]]);
+          const ai = bucket[ii]; const a = particles[ai];
+          for (let jj = ii + 1; jj < bucket.length; jj++) addLink(a, particles[bucket[jj]], 1);
         }
-        // neighbor cells
-        for (let oy = -1; oy <= 1; oy++) {
-          for (let ox = -1; ox <= 1; ox++) {
-            if (ox === 0 && oy === 0) continue; const nx = cx + ox, ny = cy + oy;
-            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue; const nb = grid[ny * cols + nx]; if (!nb) continue;
-            for (let ii = 0; ii < bucket.length; ii++) { for (let jj = 0; jj < nb.length; jj++) drawLink(particles[bucket[ii]], particles[nb[jj]]); }
+        // 邻域格
+        for (let k = 1; k < NEIGHBOR_OFFS.length; k++) { // 跳过 [0,0]
+          const nx = cx + NEIGHBOR_OFFS[k][0], ny = cy + NEIGHBOR_OFFS[k][1];
+          if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+          const nb = grid2[ny * cols + nx]; if (!nb) continue;
+          for (let ii = 0; ii < bucket.length; ii++) {
+            const a = particles[bucket[ii]];
+            for (let jj = 0; jj < nb.length; jj++) addLink(a, particles[nb[jj]], 1);
           }
         }
       }
     }
 
-    // Mouse links
+    // 鼠标连线也加入同一分桶，统一批量描边
     if (mouse.active && CONFIG.drawMouseLinks) {
       for (let i = 0; i < particles.length; i++) {
-        const p = particles[i]; const dx = p.x - mouse.x; const dy = p.y - mouse.y; const d2 = dx * dx + dy * dy;
-        if (d2 <= maxD2) {
-          const d = Math.sqrt(d2); const alpha = (1 - d / maxD) * (CONFIG.linkOpacity * 0.9);
-          ctx.strokeStyle = `rgba(${lr},${lg},${lb},${alpha.toFixed(3)})`;
-          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke();
-        }
+        const p = particles[i];
+        const dx = p.x - mouse.x; const dy = p.y - mouse.y; const d2 = dx * dx + dy * dy;
+        if (d2 <= maxD2) addLink(p, mouse, 0.9);
       }
     }
+
+    // 批量描边：每个透明度桶一次 stroke
+    ctx.strokeStyle = BASE_STROKE;
+    ctx.lineWidth = CONFIG.linkWidth;
+    for (let b = 0; b < LINK_BIN_COUNT; b++) {
+      const segs = linkBins[b];
+      if (segs.length === 0) continue;
+      const alpha = ((b + 0.5) / LINK_BIN_COUNT) * CONFIG.linkOpacity;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      for (let i = 0; i < segs.length; i += 4) { ctx.moveTo(segs[i], segs[i+1]); ctx.lineTo(segs[i+2], segs[i+3]); }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
 
     // Draw particles
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i]; let alpha = 1;
       if (CONFIG.twinkle) { p.t += 0.02; alpha = 1 - (Math.sin(p.t) * 0.5 + 0.5) * CONFIG.twinkleAmplitude; }
-      ctx.fillStyle = CONFIG.dotColor.replace(/0\.9\)/, `${(0.75 + 0.25 * alpha).toFixed(3)})`);
+      const dotA = (0.75 + 0.25 * alpha).toFixed(3);
+      ctx.fillStyle = `rgba(255,255,255,${dotA})`;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
     }
   }
