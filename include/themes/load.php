@@ -30,8 +30,8 @@ function nicen_theme_load_source() {
 
 	wp_enqueue_script( 'main', $url . '/common/main.js', array(), filemtime( $root . '/common/main.js' ), false );
 
-	/* 星辰背景动画 */
-	wp_enqueue_script( 'starfield', $url . '/common/inline/starfield.js', array(), filemtime( $root . '/common/inline/starfield.js' ), true );
+    /* 星空连线粒子背景（暗色模式使用） */
+    wp_enqueue_script( 'constellation', $url . '/common/inline/constellation.js', array(), filemtime( $root . '/common/inline/constellation.js' ), true );
 
 
 	/*主题的style.css*/
@@ -153,8 +153,8 @@ function nicen_theme_load_source() {
 			nicen_theme_config( 'document_theme_bg_color', false )
 		] ) );
 
-	/* 星辰背景样式：固定全屏且不影响布局/滚动 */
-	wp_add_inline_style( 'main-styles', '#starfield{position:fixed;inset:0;z-index:-1;pointer-events:none;display:block}' );
+    /* 星空背景样式：固定全屏、背后渲染、轻微径向渐变 */
+    wp_add_inline_style( 'main-styles', '#constellation{position:fixed;inset:0;z-index:-1;pointer-events:none;display:block;width:100vw;height:100vh;background-color:#000;background-image:radial-gradient(1200px 800px at 70% 20%, rgba(35,55,99,0.35), rgba(10,15,31,0)),radial-gradient(1000px 700px at 20% 80%, rgba(19,33,66,0.25), rgba(10,15,31,0))}' );
 
 
 	/*
