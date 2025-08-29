@@ -116,9 +116,9 @@ Tags: 文档,自适应,主题切换,阅读进度跟随
   /*
     暗黑模式，导航栏样式
   */
-  --theme-header-bg-color: #141414;
+  --theme-header-bg-color: rgba(20, 20, 20, 0.7);
   --theme-header-font-color: white;
-  --theme-sub-menu-bg-color: #141414;
+  --theme-sub-menu-bg-color: rgba(20, 20, 20, 0.7);
   --theme-sub-menu-font-color: white;
   --theme-header-border-color: transparent;
   --theme-header-shadow-color: transparent;
@@ -130,12 +130,12 @@ Tags: 文档,自适应,主题切换,阅读进度跟随
   --theme-text-secondary: rgba(235, 235, 235, 0.99);
   --theme-hover-bg: var(--theme-text-color);
   --theme-hover-color: var(--theme-black);
-  --theme-front-color: #2a2a2b;
+  --theme-front-color: rgba(42, 42, 43, 0.7);
   --theme-text-mini-color: rgba(235, 235, 235, 0.99);
   --theme-hover-shadow: rgba(223, 223, 223, 0.5);
   --theme-header-color: #141414;
   --theme-header-border: #141414;
-  --theme-front-main-color: #2a2a2b;
+  --theme-front-main-color: rgba(42, 42, 43, 0.7);
   --theme-pre: rgba(255, 255, 255, 0.87);
   --theme-pre-code-bg: #141414;
   --theme-pre-code-shadow: transparent;
