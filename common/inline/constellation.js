@@ -334,6 +334,8 @@
           attract: f32,
           linkDistance: f32,
           linkOpacity: f32,
+          massMin: f32,
+          massMax: f32,
         };
       `;
 
@@ -529,7 +531,45 @@
         @group(0) @binding(0) var<storage, read> pos: array<vec2<f32>>;
         @group(0) @binding(1) var<storage, read> radius: array<f32>;
         @group(0) @binding(2) var<uniform> params: Params;
-        struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) local: vec2<f32> };
+        @group(0) @binding(3) var<storage, read> mass: array<f32>;
+        struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) local: vec2<f32>, @location(1) col: vec3<f32> };
+
+        fn starColor(u: f32) -> vec3<f32> {
+          let uu = clamp(u, 0.0, 1.0);
+          // 分段颜色，0..1：M,K,G,F,A,B,O
+          if (uu < 0.16) {
+            let t = uu / 0.16; // M->K
+            let a = vec3<f32>(255.0, 204.0, 111.0) / 255.0;
+            let b = vec3<f32>(255.0, 210.0, 161.0) / 255.0;
+            return a + (b - a) * t;
+          } else if (uu < 0.33) {
+            let t = (uu - 0.16) / (0.17);
+            let a = vec3<f32>(255.0, 210.0, 161.0) / 255.0;
+            let b = vec3<f32>(255.0, 244.0, 234.0) / 255.0;
+            return a + (b - a) * t;
+          } else if (uu < 0.50) {
+            let t = (uu - 0.33) / (0.17);
+            let a = vec3<f32>(255.0, 244.0, 234.0) / 255.0;
+            let b = vec3<f32>(248.0, 247.0, 255.0) / 255.0;
+            return a + (b - a) * t;
+          } else if (uu < 0.66) {
+            let t = (uu - 0.50) / (0.16);
+            let a = vec3<f32>(248.0, 247.0, 255.0) / 255.0;
+            let b = vec3<f32>(202.0, 215.0, 255.0) / 255.0;
+            return a + (b - a) * t;
+          } else if (uu < 0.83) {
+            let t = (uu - 0.66) / (0.17);
+            let a = vec3<f32>(202.0, 215.0, 255.0) / 255.0;
+            let b = vec3<f32>(170.0, 191.0, 255.0) / 255.0;
+            return a + (b - a) * t;
+          } else {
+            let t = (uu - 0.83) / (0.17);
+            let a = vec3<f32>(170.0, 191.0, 255.0) / 255.0;
+            let b = vec3<f32>(155.0, 176.0, 255.0) / 255.0;
+            return a + (b - a) * t;
+          }
+        }
+
         @vertex
         fn main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
           let p = pos[iid];
@@ -547,17 +587,26 @@
           let posPx = p + offset;
           let x = (posPx.x / params.width) * 2.0 - 1.0;
           let y = 1.0 - (posPx.y / params.height) * 2.0;
-          var out: VSOut; out.pos = vec4<f32>(x, y, 0.0, 1.0); out.local = offset / r; return out;
+
+          // 质量映射到颜色（对数归一化）
+          let m = mass[iid];
+          let lmin = log(max(1e-6, params.massMin));
+          let lmax = log(max(1e-6, params.massMax));
+          let lm = log(max(1e-6, m));
+          let u = clamp((lm - lmin) / max(1e-6, lmax - lmin), 0.0, 1.0);
+          let col = starColor(u);
+
+          var out: VSOut; out.pos = vec4<f32>(x, y, 0.0, 1.0); out.local = offset / r; out.col = col; return out;
         }
       `;
       const fsPoints = /* wgsl */ `
         @fragment
-        fn main(@location(0) local: vec2<f32>) -> @location(0) vec4<f32> {
+        fn main(@location(0) local: vec2<f32>, @location(1) col: vec3<f32>) -> @location(0) vec4<f32> {
           let d2 = dot(local, local);
           if (d2 > 1.0) { discard; }
-          // 简单的柔和边缘
-          let alpha = 1.0 - smoothstep(0.9, 1.0, sqrt(d2));
-          return vec4<f32>(1.0, 1.0, 1.0, 0.75 + 0.25 * alpha);
+          let edge = 1.0 - smoothstep(0.9, 1.0, sqrt(d2));
+          let a = 0.9 * edge;
+          return vec4<f32>(col, a);
         }
       `;
 
@@ -641,6 +690,7 @@
         { binding: 0, resource: { buffer: webgpu.posBuf } },
         { binding: 1, resource: { buffer: webgpu.radiusBuf } },
         { binding: 2, resource: { buffer: webgpu.simUniform } },
+        { binding: 3, resource: { buffer: webgpu.massBuf } },
       ]});
 
       webgpu.fullAvailable = true;
@@ -694,6 +744,11 @@
     f32[14] = CONFIG.attractStrength;      // attract
     f32[15] = CONFIG.linkDistance;         // linkDistance
     f32[16] = CONFIG.linkOpacity;          // linkOpacity
+    // 质量范围用于颜色映射（基于半径上下限推导）
+    const mMin = massFromRadius(CONFIG.dotRadius[0]);
+    const mMax = massFromRadius(CONFIG.dotRadius[1]);
+    f32[17] = mMin;                        // massMin
+    f32[18] = mMax;                        // massMax
     webgpu.device.queue.writeBuffer(webgpu.simUniform, 0, ub);
   }
 
@@ -883,6 +938,38 @@
 
   function massFromRadius(r) {
     return CONFIG.massDensity * Math.pow(Math.max(0.1, r), CONFIG.alphaExponent);
+  }
+
+  // === 颜色映射：按恒星序列（M→K→G→F→A→B→O） ===
+  // 颜色使用常见恒星色近似（sRGB），分段线性插值
+  const STAR_COLOR_STOPS = [
+    { u: 0.00, rgb: [255, 204, 111] }, // M：红
+    { u: 0.16, rgb: [255, 210, 161] }, // K：橙
+    { u: 0.33, rgb: [255, 244, 234] }, // G：黄
+    { u: 0.50, rgb: [248, 247, 255] }, // F：黄白
+    { u: 0.66, rgb: [202, 215, 255] }, // A：白
+    { u: 0.83, rgb: [170, 191, 255] }, // B：蓝白
+    { u: 1.00, rgb: [155, 176, 255] }  // O：蓝
+  ];
+  function clamp01(x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+  function lerp3(a, b, t) { return [ a[0] + (b[0]-a[0]) * t, a[1] + (b[1]-a[1]) * t, a[2] + (b[2]-a[2]) * t ]; }
+  function colorFromUnit(u) {
+    u = clamp01(u);
+    for (let i = 1; i < STAR_COLOR_STOPS.length; i++) {
+      const p0 = STAR_COLOR_STOPS[i-1]; const p1 = STAR_COLOR_STOPS[i];
+      if (u <= p1.u) {
+        const t = (u - p0.u) / Math.max(1e-6, p1.u - p0.u);
+        return lerp3(p0.rgb, p1.rgb, t);
+      }
+    }
+    return STAR_COLOR_STOPS[STAR_COLOR_STOPS.length - 1].rgb;
+  }
+  function colorFromMass(m, mMin, mMax) {
+    const lm = Math.log(Math.max(1e-6, m));
+    const l0 = Math.log(Math.max(1e-6, mMin));
+    const l1 = Math.log(Math.max(1e-6, Math.max(mMax, mMin + 1e-6)));
+    const u = (lm - l0) / Math.max(1e-6, (l1 - l0));
+    return colorFromUnit(u);
   }
 
   function spawnParticle() {
@@ -1295,12 +1382,16 @@
     }
     ctx.globalAlpha = 1;
 
-    // Draw particles
+    // Draw particles（按质量上色）
+    let mMin = Infinity, mMax = -Infinity;
+    for (let i = 0; i < particles.length; i++) { const m = particles[i].m; if (m < mMin) mMin = m; if (m > mMax) mMax = m; }
+    if (!isFinite(mMin) || !isFinite(mMax) || mMin <= 0 || mMax <= 0) { mMin = 1e-3; mMax = 1; }
     for (let i = 0; i < particles.length; i++) {
-      const p = particles[i]; let alpha = 1;
-      if (CONFIG.twinkle) { p.t += 0.02; alpha = 1 - (Math.sin(p.t) * 0.5 + 0.5) * CONFIG.twinkleAmplitude; }
-      const dotA = (0.75 + 0.25 * alpha).toFixed(3);
-      ctx.fillStyle = `rgba(255,255,255,${dotA})`;
+      const p = particles[i]; let tw = 1;
+      if (CONFIG.twinkle) { p.t += 0.02; tw = 1 - (Math.sin(p.t) * 0.5 + 0.5) * CONFIG.twinkleAmplitude; }
+      const dotA = (0.75 + 0.25 * tw);
+      const rgb = colorFromMass(p.m, mMin, mMax);
+      ctx.fillStyle = `rgba(${rgb[0]|0},${rgb[1]|0},${rgb[2]|0},${dotA.toFixed(3)})`;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
     }
 
