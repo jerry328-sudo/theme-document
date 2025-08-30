@@ -25,7 +25,11 @@ if ( has_nav_menu( 'top-leval' ) ) {
 
 	/* 是否显示白天黑夜模式切换 */
 	if ( nicen_theme_config( 'document_header_show_readmode', false ) ) {
-		$args['items_wrap'] = '<ul id="%1$s" class="%2$s"><li class="menu-item read-mode"><i class="iconfont icon-baitian-qing"></i><span class="theme-mode-text" style="display: none;">Auto</span></li>%3$s</ul>';
+		// 在夜间/日间开关左侧新增动画背景开关（默认开启，点击可关闭动画，改为纯色背景）
+		$args['items_wrap'] = '<ul id="%1$s" class="%2$s">'
+			. '<li class="menu-item bg-toggle" title="关闭动画背景"><i class="iconfont icon-shezhi1"></i></li>'
+			. '<li class="menu-item read-mode"><i class="iconfont icon-baitian-qing"></i><span class="theme-mode-text" style="display: none;">Auto</span></li>%3$s'
+			. '</ul>';
 	} else {
 		$args['items_wrap'] = '<ul id="%1$s" class="%2$s">%3$s</ul>';
 	}

@@ -92,6 +92,8 @@
   const linkBins = Array.from({ length: LINK_BIN_COUNT }, () => []); // 每桶存放 [x1,y1,x2,y2,...]
   const BASE_STROKE = `rgb(${CONFIG.lineColor[0]},${CONFIG.lineColor[1]},${CONFIG.lineColor[2]})`;
 
+  // 用户偏好：是否启用动画背景（默认启用）
+  let userEnabled = (typeof localStorage !== 'undefined') ? (localStorage.getItem('bg-anim') !== 'off') : true;
   let isDark = root.classList.contains('dark');
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let targetCount = 0;
@@ -1491,13 +1493,13 @@
   function start() { if (!raf) { if (!ctx) ctx = canvas.getContext('2d', { alpha: true }); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); lastTime = performance.now(); raf = window.requestAnimationFrame(loop); } }
   function handleVisibility() {
     if (document.hidden) { pause(); pauseGPU(); }
-    else if (isDark && !media.matches) { if (webgpu.fullAvailable) startGPU(); else start(); }
+    else if (userEnabled && isDark && !media.matches) { if (webgpu.fullAvailable) startGPU(); else start(); }
   }
 
   // Mode application
   function applyMode() {
     const prev = isDark; isDark = root.classList.contains('dark');
-    if (!isDark || media.matches) {
+    if (!userEnabled || !isDark || media.matches) {
       canvas.style.display = 'none';
       pause(); pauseGPU(); if (ctx) ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
       return;
@@ -1519,11 +1521,24 @@
   document.addEventListener('visibilitychange', handleVisibility);
   media.addEventListener ? media.addEventListener('change', applyMode) : media.addListener(applyMode);
 
+  // 暴露简单控制 API 供外部切换
+  try {
+    window.Constellation = window.Constellation || {};
+    window.Constellation.setEnabled = function (enabled) {
+      userEnabled = !!enabled;
+      try { localStorage.setItem('bg-anim', userEnabled ? 'on' : 'off'); } catch (e) {}
+      applyMode();
+    };
+    window.Constellation.isEnabled = function () { return !!userEnabled; };
+    window.Constellation.toggle = function () { window.Constellation.setEnabled(!userEnabled); };
+  } catch (e) { /* no-op */ }
+
   // Init
   initWebGPU();
   initFullGPU();
   resize(); computeTargetCount(); ensureCount();
   // 若全 GPU 可用，初始化粒子缓冲
   if (CONFIG.fullGPU) initParticlesGPU();
+  // 初始根据用户偏好与模式应用
   applyMode();
 })();

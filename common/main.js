@@ -76,6 +76,44 @@ $(function ($) {
             }
         });
 
+        /*
+        * 动画背景开关（位于夜间/日间开关左侧）
+        * localStorage key: 'bg-anim' => 'on' | 'off'
+        * */
+        (function initBgAnimToggle(){
+            const $btn = $('.bg-toggle');
+            if ($btn.length === 0) return;
+
+            function setUI(enabled){
+                const $icon = $btn.find('.iconfont');
+                if (enabled){
+                    $icon.removeClass('icon-cha').addClass('icon-shezhi1');
+                    $btn.attr('title','关闭动画背景');
+                } else {
+                    $icon.removeClass('icon-shezhi1').addClass('icon-cha');
+                    $btn.attr('title','开启动画背景');
+                }
+            }
+
+            const pref = localStorage.getItem('bg-anim');
+            const enabled = (pref !== 'off');
+            setUI(enabled);
+
+            $btn.on('click', function(){
+                const current = localStorage.getItem('bg-anim') !== 'off';
+                const next = !current;
+                localStorage.setItem('bg-anim', next ? 'on' : 'off');
+                setUI(next);
+                if (window.Constellation && typeof window.Constellation.setEnabled === 'function'){
+                    window.Constellation.setEnabled(next);
+                } else {
+                    // 兜底：直接显示/隐藏画布
+                    const c = document.getElementById('constellation');
+                    if (c) c.style.display = next ? 'block' : 'none';
+                }
+            });
+        })();
+
     })();
 
 

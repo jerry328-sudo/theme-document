@@ -156,6 +156,9 @@ function nicen_theme_load_source() {
     /* 星空背景样式：固定全屏、背后渲染、轻微径向渐变 */
     wp_add_inline_style( 'main-styles', '#constellation{position:fixed;inset:0;z-index:-1;pointer-events:none;display:block;width:100vw;height:100vh;background-color:#000;background-image:radial-gradient(1200px 800px at 70% 20%, rgba(35,55,99,0.35), rgba(10,15,31,0)),radial-gradient(1000px 700px at 20% 80%, rgba(19,33,66,0.25), rgba(10,15,31,0))}' );
 
+    /* 导航左侧新增的动画背景开关样式，保持与 read-mode 对齐 */
+    wp_add_inline_style( 'main-styles', '.main-header .right .menu .bg-toggle{display:flex;align-items:center;justify-content:center;min-width:2rem}.main-header .right .menu .bg-toggle .iconfont{font-size:var(--theme-text);}' );
+
 
 	/*
 	 * 动态加载页面资源
