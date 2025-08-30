@@ -17,7 +17,8 @@
     canvas.id = ID;
     document.body.prepend(canvas);
   }
-  const ctx = canvas.getContext('2d', { alpha: true });
+  // 2D ctx 仅在 CPU 路径下使用；全 GPU 渲染时不获取 2D 上下文
+  let ctx = null;
 
   // Config
   const CONFIG = {
@@ -80,7 +81,9 @@
     collapseGlow: true                 // 使用叠加发光
     ,
     // WebGPU 开关
-    enableWebGPU: true
+    enableWebGPU: true,
+    // 全 GPU 渲染（计算+积分+绘制），可回退到 CPU+Canvas2D
+    fullGPU: true
   };
 
   // 常量与可复用结构（避免每帧创建临时对象）
@@ -93,6 +96,7 @@
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let targetCount = 0;
   const particles = [];
+  let gpuN = 0; // 全 GPU 模式的粒子数量
   // 物理状态（避免每帧重新分配）
   let ax = [], ay = [], axNext = [], ayNext = [];
   let haveAccel = false;
@@ -102,10 +106,11 @@
   let PW_DELTA = 0.2; // PW 钳位相对 ε 的比例，实际值在 resize 后设
   const rand = (a, b) => Math.random() * (b - a) + a;
 
-  // WebGPU 状态
+  // WebGPU 状态（用于计算与全 GPU 渲染）
   const webgpu = {
     available: false,
     device: null,
+    // 旧：只用于加速度计算
     pipeline: null,
     bindGroup: null,
     uniformBuffer: null,
@@ -116,7 +121,37 @@
     capacity: 0,
     posF32: null,
     massF32: null,
-    accF32: null
+    accF32: null,
+    // 新：全 GPU 渲染管线与缓冲
+    fullAvailable: false,
+    canvasCtx: null,
+    format: null,
+    // 统一参数
+    simUniform: null,
+    // 粒子相关（storage）
+    posBuf: null,
+    velBuf: null,
+    massBuf: null,
+    radiusBuf: null,
+    accBuf: null,
+    // 线段顶点与计数
+    segVertBuf: null,   // 每顶点: vec3(x,y,alpha)
+    segCountBuf: null,  // atomic<u32>
+    segDrawIndirect: null, // {vertexCount, instanceCount, firstVertex, firstInstance}
+    maxSegments: 45000, // 安全上限（N<=260，最坏 N*(N-1)/2 ≈ 33k）
+    // Compute pipelines
+    kpAcc: null,
+    kpIntegrateHalf: null,
+    kpLines: null,
+    kpClearSeg: null,
+    // BindGroups
+    bgAcc: null,
+    bgIntegrate: null,
+    bgLines: null,
+    bgClearSeg: null,
+    // Render pipelines
+    rpLines: null,
+    rpPoints: null
   };
 
   async function initWebGPU() {
@@ -244,6 +279,506 @@
     }
   }
 
+  // 全 GPU（计算+积分+绘制）初始化
+  async function initFullGPU() {
+    try {
+      if (!CONFIG.enableWebGPU || !CONFIG.fullGPU || !('gpu' in navigator)) return;
+      // 设备
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (!adapter) return;
+      if (!webgpu.device) webgpu.device = await adapter.requestDevice();
+      const device = webgpu.device;
+
+      // 画布上下文
+      const canvasCtx = canvas.getContext('webgpu');
+      if (!canvasCtx) return;
+      const format = navigator.gpu.getPreferredCanvasFormat();
+      webgpu.canvasCtx = canvasCtx; webgpu.format = format;
+
+      // 缓冲区容量
+      webgpu.capacity = CONFIG.maxCount;
+      const cap = webgpu.capacity;
+
+      // 统一参数（256B 对齐）
+      webgpu.simUniform = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+      // 粒子与加速度（storage）
+      webgpu.posBuf    = device.createBuffer({ size: cap * 2 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      webgpu.velBuf    = device.createBuffer({ size: cap * 2 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      webgpu.massBuf   = device.createBuffer({ size: cap * 4,     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      webgpu.radiusBuf = device.createBuffer({ size: cap * 4,     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      webgpu.accBuf    = device.createBuffer({ size: cap * 2 * 4, usage: GPUBufferUsage.STORAGE });
+
+      // 线段顶点与计数
+      const maxVerts = webgpu.maxSegments * 2;
+      webgpu.segVertBuf    = device.createBuffer({ size: maxVerts * 3 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
+      webgpu.segCountBuf   = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      webgpu.segDrawIndirect = device.createBuffer({ size: 16, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE });
+
+      // WGSL：参数结构
+      const paramsWGSL = `
+        struct Params {
+          N: u32,
+          usePW: u32,
+          padA: vec2<u32>,
+          eps2: f32,
+          G: f32,
+          C: f32,
+          kappa: f32,
+          dt: f32,
+          width: f32,
+          height: f32,
+          mouseX: f32,
+          mouseY: f32,
+          hoverR: f32,
+          attract: f32,
+          linkDistance: f32,
+          linkOpacity: f32,
+        };
+      `;
+
+      // WGSL：加速度（tile）+ 鼠标外力
+      const accWGSL = /* wgsl */ `
+        ${paramsWGSL}
+        @group(0) @binding(0) var<storage, read> pos: array<vec2<f32>>;
+        @group(0) @binding(1) var<storage, read> mass: array<f32>;
+        @group(0) @binding(2) var<storage, read_write> acc: array<vec2<f32>>;
+        @group(0) @binding(3) var<uniform> params: Params;
+        var<workgroup> tPos: array<vec2<f32>, 64>;
+        var<workgroup> tMass: array<f32, 64>;
+        @compute @workgroup_size(64)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+          let i = gid.x; if (i >= params.N) { return; }
+          var ai = vec2<f32>(0.0, 0.0);
+          let N = params.N;
+          var base: u32 = 0u;
+          loop {
+            if (base >= N) { break; }
+            let j = base + lid.x;
+            if (j < N) {
+              tPos[lid.x] = pos[j];
+              tMass[lid.x] = mass[j];
+            }
+            workgroupBarrier();
+            let maxJ = min(base + 64u, N);
+            var jj: u32 = base;
+            loop {
+              if (jj >= maxJ) { break; }
+              if (jj != i) {
+                let d = tPos[jj - base] - pos[i];
+                let r2 = d.x*d.x + d.y*d.y;
+                let r = sqrt(max(r2, 1e-12));
+                var axv: f32; var ayv: f32;
+                if (params.usePW == 1u) {
+                  let rs = 2.0 * params.G * tMass[jj - base] / (params.C * params.C);
+                  if (r < params.kappa * rs) {
+                    let reff = max(0.2 * sqrt(params.eps2), r - rs);
+                    let mag = params.G * tMass[jj - base] / (reff * reff);
+                    axv = (d.x / r) * mag; ayv = (d.y / r) * mag;
+                  } else {
+                    let inv = inverseSqrt(r2 + params.eps2);
+                    let inv3 = inv * inv * inv;
+                    let mag = params.G * tMass[jj - base] * inv3;
+                    axv = d.x * mag; ayv = d.y * mag;
+                  }
+                } else {
+                  let inv = inverseSqrt(r2 + params.eps2);
+                  let inv3 = inv * inv * inv;
+                  let mag = params.G * tMass[jj - base] * inv3;
+                  axv = d.x * mag; ayv = d.y * mag;
+                }
+                ai.x = ai.x + axv; ai.y = ai.y + ayv;
+              }
+              jj = jj + 1u;
+            }
+            workgroupBarrier();
+            base = base + 64u;
+          }
+          // 鼠标外力（局部快速衰减）
+          let dxm = params.mouseX - pos[i].x; let dym = params.mouseY - pos[i].y;
+          let rm = sqrt(dxm*dxm + dym*dym) + 1e-12;
+          if (rm < params.hoverR) {
+            let t = 1.0 - rm / params.hoverR;
+            let fall = t * t;
+            ai = ai + (vec2<f32>(dxm, dym) / rm) * (params.attract * fall);
+          }
+          acc[i] = ai;
+        }
+      `;
+
+      // WGSL：半步积分（v += 0.5*a*dt; pos += v*dt; 边界反弹）
+      const integrateHalfWGSL = /* wgsl */ `
+        ${paramsWGSL}
+        @group(0) @binding(0) var<storage, read_write> pos: array<vec2<f32>>;
+        @group(0) @binding(1) var<storage, read_write> vel: array<vec2<f32>>;
+        @group(0) @binding(2) var<storage, read>       acc: array<vec2<f32>>;
+        @group(0) @binding(3) var<uniform> params: Params;
+        @compute @workgroup_size(128)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x; if (i >= params.N) { return; }
+          var v = vel[i];
+          let a = acc[i];
+          v = v + a * (0.5 * params.dt);
+          var p = pos[i] + v * params.dt;
+          // 边界反弹
+          if (p.x < 0.0) { p.x = 0.0; v.x = -v.x; }
+          else if (p.x > params.width) { p.x = params.width; v.x = -v.x; }
+          if (p.y < 0.0) { p.y = 0.0; v.y = -v.y; }
+          else if (p.y > params.height) { p.y = params.height; v.y = -v.y; }
+          pos[i] = p; vel[i] = v;
+        }
+      `;
+
+      // WGSL：速度下半步（v += 0.5*a_new*dt）
+      const integrateVelWGSL = /* wgsl */ `
+        ${paramsWGSL}
+        @group(0) @binding(0) var<storage, read_write> vel: array<vec2<f32>>;
+        @group(0) @binding(1) var<storage, read>       acc: array<vec2<f32>>;
+        @group(0) @binding(2) var<uniform> params: Params;
+        @compute @workgroup_size(128)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x; if (i >= params.N) { return; }
+          var v = vel[i];
+          v = v + acc[i] * (0.5 * params.dt);
+          vel[i] = v;
+        }
+      `;
+
+      // WGSL：线段构建（阈值内的成对距离 -> 顶点写入）
+      const linesWGSL = /* wgsl */ `
+        ${paramsWGSL}
+        struct Vert { x: f32, y: f32, a: f32 };
+        @group(0) @binding(0) var<storage, read> pos: array<vec2<f32>>;
+        @group(0) @binding(1) var<uniform> params: Params;
+        @group(0) @binding(2) var<storage, read_write> outVerts: array<Vert>;
+        @group(0) @binding(3) var<storage, read_write> counter: atomic<u32>;
+        @compute @workgroup_size(64)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x; if (i >= params.N) { return; }
+          let maxVerts: u32 = ${String(webgpu.maxSegments * 2)}u; // 编译期常量
+          let pi = pos[i];
+          var j: u32 = i + 1u;
+          loop {
+            if (j >= params.N) { break; }
+            let pj = pos[j];
+            let dx = pj.x - pi.x; let dy = pj.y - pi.y;
+            let d2 = dx*dx + dy*dy;
+            let maxD = params.linkDistance; let maxD2 = maxD*maxD;
+            if (d2 <= maxD2) {
+              let d = sqrt(max(d2, 1e-12));
+              let alpha = max(0.0, (1.0 - d / maxD) * params.linkOpacity);
+              // 两个顶点
+              let base = atomicAdd(&counter, 2u);
+              if (base + 1u < maxVerts) {
+                outVerts[base].x = pi.x; outVerts[base].y = pi.y; outVerts[base].a = alpha;
+                outVerts[base+1u].x = pj.x; outVerts[base+1u].y = pj.y; outVerts[base+1u].a = alpha;
+              }
+            }
+            j = j + 1u;
+          }
+        }
+      `;
+
+      // 清零线段计数 & 准备间接绘制参数
+      const clearSegWGSL = /* wgsl */ `
+        struct DrawIndirect { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+        @group(0) @binding(0) var<storage, read_write> counter: atomic<u32>;
+        @group(0) @binding(1) var<storage, read_write> draw: DrawIndirect;
+        @compute @workgroup_size(1)
+        fn main() {
+          atomicStore(&counter, 0u);
+          draw.vertexCount = 0u; draw.instanceCount = 1u; draw.firstVertex = 0u; draw.firstInstance = 0u;
+        }
+      `;
+
+      const finalizeSegWGSL = /* wgsl */ `
+        struct DrawIndirect { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+        @group(0) @binding(0) var<storage, read> counter: atomic<u32>;
+        @group(0) @binding(1) var<storage, read_write> draw: DrawIndirect;
+        @compute @workgroup_size(1)
+        fn main() {
+          // 直接把顶点计数写入
+          let vc = atomicLoad(&counter);
+          draw.vertexCount = vc;
+          draw.instanceCount = 1u; draw.firstVertex = 0u; draw.firstInstance = 0u;
+        }
+      `;
+
+      // Render: lines（line-list）与 points（实例化方片）
+      const vsLines = /* wgsl */ `
+        struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) a: f32 };
+        @group(0) @binding(0) var<uniform> params: Params;
+        struct Vert { x: f32, y: f32, a: f32 };
+        @vertex
+        fn main(@location(0) posxy: vec2<f32>, @location(1) alpha: f32) -> VSOut {
+          let x = (posxy.x / params.width) * 2.0 - 1.0;
+          let y = 1.0 - (posxy.y / params.height) * 2.0;
+          var out: VSOut; out.pos = vec4<f32>(x, y, 0.0, 1.0); out.a = alpha; return out;
+        }
+      `;
+      const fsLines = /* wgsl */ `
+        @group(0) @binding(0) var<uniform> params: Params;
+        @fragment
+        fn main(@location(0) a: f32) -> @location(0) vec4<f32> {
+          return vec4<f32>(1.0, 1.0, 1.0, a);
+        }
+      `;
+
+      const vsPoints = /* wgsl */ `
+        ${paramsWGSL}
+        @group(0) @binding(0) var<storage, read> pos: array<vec2<f32>>;
+        @group(0) @binding(1) var<storage, read> radius: array<f32>;
+        @group(0) @binding(2) var<uniform> params: Params;
+        struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) local: vec2<f32> };
+        @vertex
+        fn main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
+          let p = pos[iid];
+          let r = max(0.5, radius[iid]);
+          // 两个三角形的六个顶点
+          var offset = vec2<f32>(0.0, 0.0);
+          switch(vid) {
+            case 0u: { offset = vec2<f32>(-r, -r); }
+            case 1u: { offset = vec2<f32>( r, -r); }
+            case 2u: { offset = vec2<f32>( r,  r); }
+            case 3u: { offset = vec2<f32>(-r, -r); }
+            case 4u: { offset = vec2<f32>( r,  r); }
+            default: { offset = vec2<f32>(-r,  r); }
+          }
+          let posPx = p + offset;
+          let x = (posPx.x / params.width) * 2.0 - 1.0;
+          let y = 1.0 - (posPx.y / params.height) * 2.0;
+          var out: VSOut; out.pos = vec4<f32>(x, y, 0.0, 1.0); out.local = offset / r; return out;
+        }
+      `;
+      const fsPoints = /* wgsl */ `
+        @fragment
+        fn main(@location(0) local: vec2<f32>) -> @location(0) vec4<f32> {
+          let d2 = dot(local, local);
+          if (d2 > 1.0) { discard; }
+          // 简单的柔和边缘
+          let alpha = 1.0 - smoothstep(0.9, 1.0, sqrt(d2));
+          return vec4<f32>(1.0, 1.0, 1.0, 0.75 + 0.25 * alpha);
+        }
+      `;
+
+      // 构建管线与 BindGroup
+      const accModule = device.createShaderModule({ code: accWGSL });
+      const integrateHalfModule = device.createShaderModule({ code: integrateHalfWGSL });
+      const integrateVelModule = device.createShaderModule({ code: integrateVelWGSL });
+      const linesModule = device.createShaderModule({ code: linesWGSL });
+      const clearSegModule = device.createShaderModule({ code: clearSegWGSL });
+      const finalizeSegModule = device.createShaderModule({ code: finalizeSegWGSL });
+
+      webgpu.kpAcc = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: accModule, entryPoint: 'main' } });
+      webgpu.kpIntegrateHalf = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: integrateHalfModule, entryPoint: 'main' } });
+      webgpu.kpIntegrateVel = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: integrateVelModule, entryPoint: 'main' } });
+      webgpu.kpLines = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: linesModule, entryPoint: 'main' } });
+      webgpu.kpClearSeg = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: clearSegModule, entryPoint: 'main' } });
+      webgpu.kpFinalizeSeg = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: finalizeSegModule, entryPoint: 'main' } });
+
+      // Bind groups（按各自所需绑定）
+      webgpu.bgAcc = device.createBindGroup({ layout: webgpu.kpAcc.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.posBuf } },
+        { binding: 1, resource: { buffer: webgpu.massBuf } },
+        { binding: 2, resource: { buffer: webgpu.accBuf } },
+        { binding: 3, resource: { buffer: webgpu.simUniform } },
+      ]});
+      webgpu.bgIntegrate = device.createBindGroup({ layout: webgpu.kpIntegrateHalf.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.posBuf } },
+        { binding: 1, resource: { buffer: webgpu.velBuf } },
+        { binding: 2, resource: { buffer: webgpu.accBuf } },
+        { binding: 3, resource: { buffer: webgpu.simUniform } },
+      ]});
+      webgpu.bgIntegrateVel = device.createBindGroup({ layout: webgpu.kpIntegrateVel.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.velBuf } },
+        { binding: 1, resource: { buffer: webgpu.accBuf } },
+        { binding: 2, resource: { buffer: webgpu.simUniform } },
+      ]});
+      webgpu.bgLines = device.createBindGroup({ layout: webgpu.kpLines.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.posBuf } },
+        { binding: 1, resource: { buffer: webgpu.simUniform } },
+        { binding: 2, resource: { buffer: webgpu.segVertBuf } },
+        { binding: 3, resource: { buffer: webgpu.segCountBuf } },
+      ]});
+      webgpu.bgClearSeg = device.createBindGroup({ layout: webgpu.kpClearSeg.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.segCountBuf } },
+        { binding: 1, resource: { buffer: webgpu.segDrawIndirect } },
+      ]});
+      webgpu.bgFinalizeSeg = device.createBindGroup({ layout: webgpu.kpFinalizeSeg.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.segCountBuf } },
+        { binding: 1, resource: { buffer: webgpu.segDrawIndirect } },
+      ]});
+
+      // Render pipelines
+      const vsLinesModule = device.createShaderModule({ code: vsLines });
+      const fsLinesModule = device.createShaderModule({ code: fsLines });
+      const vsPointsModule = device.createShaderModule({ code: vsPoints });
+      const fsPointsModule = device.createShaderModule({ code: fsPoints });
+
+      webgpu.rpLines = await device.createRenderPipelineAsync({
+        layout: 'auto',
+        vertex: {
+          module: vsLinesModule, entryPoint: 'main',
+          buffers: [
+            { arrayStride: 3 * 4, attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x2' },
+              { shaderLocation: 1, offset: 2 * 4, format: 'float32' },
+            ]}
+          ]
+        },
+        fragment: { module: fsLinesModule, entryPoint: 'main', targets: [{ format }] },
+        primitive: { topology: 'line-list' },
+      });
+
+      webgpu.rpPoints = await device.createRenderPipelineAsync({
+        layout: 'auto',
+        vertex: { module: vsPointsModule, entryPoint: 'main' },
+        fragment: { module: fsPointsModule, entryPoint: 'main', targets: [{ format }] },
+        primitive: { topology: 'triangle-list' },
+      });
+
+      webgpu.bgPoints = device.createBindGroup({ layout: webgpu.rpPoints.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: webgpu.posBuf } },
+        { binding: 1, resource: { buffer: webgpu.radiusBuf } },
+        { binding: 2, resource: { buffer: webgpu.simUniform } },
+      ]});
+
+      webgpu.fullAvailable = true;
+    } catch (e) {
+      console.warn('Full GPU init failed; fallback to CPU/2D:', e);
+      webgpu.fullAvailable = false;
+    }
+  }
+
+  function initParticlesGPU() {
+    if (!webgpu.fullAvailable) return;
+    gpuN = targetCount;
+    const w = window.innerWidth, h = window.innerHeight;
+    const pos = new Float32Array(gpuN * 2);
+    const vel = new Float32Array(gpuN * 2);
+    const mass = new Float32Array(gpuN);
+    const radius = new Float32Array(gpuN);
+    for (let i = 0; i < gpuN; i++) {
+      const r = rand(CONFIG.dotRadius[0], CONFIG.dotRadius[1]);
+      radius[i] = r;
+      mass[i] = massFromRadius(r);
+      pos[2*i] = rand(0, w);
+      pos[2*i+1] = rand(0, h);
+      vel[2*i] = rand(-CONFIG.visualSpeedMax * 0.2, CONFIG.visualSpeedMax * 0.2);
+      vel[2*i+1] = rand(-CONFIG.visualSpeedMax * 0.2, CONFIG.visualSpeedMax * 0.2);
+    }
+    const dev = webgpu.device;
+    dev.queue.writeBuffer(webgpu.posBuf, 0, pos);
+    dev.queue.writeBuffer(webgpu.velBuf, 0, vel);
+    dev.queue.writeBuffer(webgpu.massBuf, 0, mass);
+    dev.queue.writeBuffer(webgpu.radiusBuf, 0, radius);
+  }
+
+  function writeSimUniform(dt) {
+    if (!webgpu.fullAvailable) return;
+    const ub = new ArrayBuffer(256);
+    const u32 = new Uint32Array(ub);
+    const f32 = new Float32Array(ub);
+    u32[0] = gpuN >>> 0;                   // N
+    u32[1] = CONFIG.usePW ? 1 : 0;         // usePW
+    f32[4] = EPS * EPS;                    // eps2
+    f32[5] = Gstar;                        // G
+    f32[6] = Cstar;                        // C
+    f32[7] = CONFIG.kappaPW;               // kappa
+    f32[8] = dt;                           // dt
+    f32[9] = window.innerWidth;            // width
+    f32[10] = window.innerHeight;          // height
+    f32[11] = mouse.active ? mouse.x : -99999; // mouseX
+    f32[12] = mouse.active ? mouse.y : -99999; // mouseY
+    f32[13] = CONFIG.hoverRadius;          // hoverR
+    f32[14] = CONFIG.attractStrength;      // attract
+    f32[15] = CONFIG.linkDistance;         // linkDistance
+    f32[16] = CONFIG.linkOpacity;          // linkOpacity
+    webgpu.device.queue.writeBuffer(webgpu.simUniform, 0, ub);
+  }
+
+  let rafGPU = 0;
+  let lastTimeGPU = performance.now();
+  async function loopGPU(now) {
+    const dt = CONFIG.dtScale * Math.max(0.5, Math.min(2.0, (now - lastTimeGPU) / (1000 / 60)));
+    lastTimeGPU = now;
+    writeSimUniform(dt);
+    const dev = webgpu.device;
+    const encoder = dev.createCommandEncoder();
+
+    // 清零线段计数 + 绘制参数
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpClearSeg); pass.setBindGroup(0, webgpu.bgClearSeg); pass.dispatchWorkgroups(1); pass.end();
+    }
+    // a(t)
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpAcc); pass.setBindGroup(0, webgpu.bgAcc);
+      const groups = Math.ceil(gpuN / 64);
+      pass.dispatchWorkgroups(groups);
+      pass.end();
+    }
+    // v += 0.5 a dt; x += v dt
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpIntegrateHalf); pass.setBindGroup(0, webgpu.bgIntegrate);
+      const groups = Math.ceil(gpuN / 128);
+      pass.dispatchWorkgroups(groups);
+      pass.end();
+    }
+    // a(t+dt)
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpAcc); pass.setBindGroup(0, webgpu.bgAcc);
+      const groups = Math.ceil(gpuN / 64);
+      pass.dispatchWorkgroups(groups);
+      pass.end();
+    }
+    // v += 0.5 a dt
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpIntegrateVel); pass.setBindGroup(0, webgpu.bgIntegrateVel);
+      const groups = Math.ceil(gpuN / 128);
+      pass.dispatchWorkgroups(groups);
+      pass.end();
+    }
+    // Build lines + finalize indirect
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpLines); pass.setBindGroup(0, webgpu.bgLines);
+      const groups = Math.ceil(gpuN / 64);
+      pass.dispatchWorkgroups(groups);
+      pass.end();
+    }
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(webgpu.kpFinalizeSeg); pass.setBindGroup(0, webgpu.bgFinalizeSeg);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+    }
+
+    // Render pass
+    const view = webgpu.canvasCtx.getCurrentTexture().createView();
+    const rp = encoder.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    // Lines
+    rp.setPipeline(webgpu.rpLines);
+    rp.setBindGroup(0, dev.createBindGroup({ layout: webgpu.rpLines.getBindGroupLayout(0), entries: [ { binding: 0, resource: { buffer: webgpu.simUniform } } ] }));
+    rp.setVertexBuffer(0, webgpu.segVertBuf);
+    rp.drawIndirect(webgpu.segDrawIndirect, 0);
+    // Points
+    rp.setPipeline(webgpu.rpPoints);
+    rp.setBindGroup(0, webgpu.bgPoints);
+    rp.draw(6, gpuN, 0, 0);
+    rp.end();
+
+    dev.queue.submit([encoder.finish()]);
+    rafGPU = window.requestAnimationFrame(loopGPU);
+  }
+
+  function startGPU() { if (!rafGPU) { lastTimeGPU = performance.now(); rafGPU = window.requestAnimationFrame(loopGPU); } }
+  function pauseGPU() { if (rafGPU) { window.cancelAnimationFrame(rafGPU); rafGPU = 0; } }
+
   function updateUniformsForGPU(N) {
     if (!webgpu.available) return;
     const ub = new ArrayBuffer(32);
@@ -269,8 +804,8 @@
       pos[2*i] = p.x; pos[2*i+1] = p.y; mass[i] = p.m;
     }
     const dev = webgpu.device;
-    dev.queue.writeBuffer(webgpu.posBuffer, 0, pos, 0, N * 2);
-    dev.queue.writeBuffer(webgpu.massBuffer, 0, mass, 0, N);
+    dev.queue.writeBuffer(webgpu.posBuffer, 0, pos.subarray(0, N * 2));
+    dev.queue.writeBuffer(webgpu.massBuffer, 0, mass.subarray(0, N));
     updateUniformsForGPU(N);
 
     const encoder = dev.createCommandEncoder();
@@ -328,7 +863,17 @@
     canvas.height = Math.max(1, Math.floor(h * dpr));
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 配置 WebGPU 画布
+    if (webgpu.fullAvailable && webgpu.canvasCtx) {
+      try {
+        webgpu.canvasCtx.configure({ device: webgpu.device, format: webgpu.format, alphaMode: 'premultiplied' });
+      } catch (e) {
+        // 某些实现需在尺寸变化后重新配置
+        try { webgpu.canvasCtx.unconfigure && webgpu.canvasCtx.unconfigure(); } catch {}
+        try { webgpu.canvasCtx.configure({ device: webgpu.device, format: webgpu.format, alphaMode: 'premultiplied' }); } catch {}
+      }
+    }
     computeTargetCount();
     ensureCount();
     // 更新软化长度与常数标定
@@ -852,19 +1397,28 @@
   // Reduced motion + visibility handling
   const media = window.matchMedia('(prefers-reduced-motion: reduce)');
   function pause() { if (raf) { window.cancelAnimationFrame(raf); raf = 0; } }
-  function start() { if (!raf) { lastTime = performance.now(); raf = window.requestAnimationFrame(loop); } }
-  function handleVisibility() { if (document.hidden) pause(); else if (isDark && !media.matches) start(); }
+  function start() { if (!raf) { if (!ctx) ctx = canvas.getContext('2d', { alpha: true }); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); lastTime = performance.now(); raf = window.requestAnimationFrame(loop); } }
+  function handleVisibility() {
+    if (document.hidden) { pause(); pauseGPU(); }
+    else if (isDark && !media.matches) { if (webgpu.fullAvailable) startGPU(); else start(); }
+  }
 
   // Mode application
   function applyMode() {
     const prev = isDark; isDark = root.classList.contains('dark');
     if (!isDark || media.matches) {
       canvas.style.display = 'none';
-      pause(); ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      pause(); pauseGPU(); if (ctx) ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
       return;
     }
     canvas.style.display = 'block';
-    resize(); if (!raf) start();
+    resize();
+    if (webgpu.fullAvailable) {
+      if (gpuN !== targetCount) initParticlesGPU();
+      if (!rafGPU) startGPU();
+    } else {
+      if (!raf) start();
+    }
   }
 
   const mo = new MutationObserver(applyMode);
@@ -876,5 +1430,9 @@
 
   // Init
   initWebGPU();
-  resize(); computeTargetCount(); ensureCount(); applyMode();
+  initFullGPU();
+  resize(); computeTargetCount(); ensureCount();
+  // 若全 GPU 可用，初始化粒子缓冲
+  if (CONFIG.fullGPU) initParticlesGPU();
+  applyMode();
 })();
