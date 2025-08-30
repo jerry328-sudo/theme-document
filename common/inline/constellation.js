@@ -46,7 +46,7 @@
     linkWidth: 0.8, // 连线宽度
     linkOpacity: 0.7, // 最大不透明度
     hoverRadius: 160, // 鼠标引力作用半径（决定衰减范围）
-    attractStrength: 0.1, // 鼠标吸引强度（加速度），远弱于引力
+    attractStrength: 0.5, // 鼠标吸引强度（加速度），远弱于引力
     dotColor: 'rgba(255,255,255,1)',
     lineColor: [255, 255, 255], 
     twinkle: true, // 点闪烁
@@ -68,7 +68,16 @@
     cometJitter: 0.25,         // 初速度随机抖动比例
     cometDamping: 0.04,        // 速度阻尼
     cometOpacity: 0.9,         // 最高不透明度
-    cometMaxCount: 500         // 尾巴粒子最大数量（防止过多导致卡顿）
+    cometMaxCount: 500
+    ,
+    // 粒子坍缩（质量过大时消失并播放动画）
+    collapseEnabled: true,
+    // 若设置具体质量阈值则优先使用；否则使用半径阈值推导质量阈值
+    collapseMassThreshold: 0,          // 0 表示未显式设置
+    collapseRadiusThreshold: 10,      // 由此半径推导质量阈值
+    collapseDuration: 650,             // 动画时长（ms）
+    collapseOpacity: 0.85,             // 动画最大不透明度
+    collapseGlow: true                 // 使用叠加发光
     ,
     // WebGPU 开关
     enableWebGPU: true
@@ -357,6 +366,7 @@
   const mouse = { x: 0, y: 0, active: false, dragging: false };
   const mouseTrail = []; // 线段尾巴 {x,y,t}
   const cometParticles = []; // 粒子尾巴 {x,y,vx,vy,life,lifeMax,r}
+  const collapseEffects = []; // 坍缩特效 {x,y,r0,t0,dur}
   const lastMouse = { x: 0, y: 0, has: false };
   function clearTrail() { mouseTrail.length = 0; }
   function clearComet() { cometParticles.length = 0; }
@@ -486,6 +496,39 @@
     const M = Math.max(1e-6, totalMass());
     Gstar = (vCirc * vCirc) * (R / M);
     Cstar = Math.max(vCirc * 10, CONFIG.lightSpeedFactor * CONFIG.visualSpeedMax);
+  }
+
+  // === 坍缩相关 ===
+  function getCollapseMassThreshold() {
+    if (!CONFIG.collapseEnabled) return Infinity;
+    if (CONFIG.collapseMassThreshold && CONFIG.collapseMassThreshold > 0) return CONFIG.collapseMassThreshold;
+    const r = CONFIG.collapseRadiusThreshold || 3.6;
+    return massFromRadius(r);
+  }
+
+  function scheduleCollapseEffect(x, y, r0) {
+    const t0 = performance.now();
+    collapseEffects.push({ x, y, r0: Math.max(0.5, r0), t0, dur: Math.max(200, CONFIG.collapseDuration || 600) });
+  }
+
+  function collapseHeavyParticles() {
+    if (!CONFIG.collapseEnabled) return;
+    const thr = getCollapseMassThreshold();
+    if (!isFinite(thr) || thr <= 0) return;
+    const removeIdx = [];
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      if (p.m >= thr) { removeIdx.push(i); scheduleCollapseEffect(p.x, p.y, p.r); }
+    }
+    if (removeIdx.length > 0) {
+      // 生成新列表，移除坍缩粒子
+      const keep = [];
+      for (let i = 0; i < particles.length; i++) if (removeIdx.indexOf(i) === -1) keep.push(particles[i]);
+      particles.length = 0; particles.push(...keep);
+      ensureCount();
+      updateSofteningAndConstants();
+      haveAccel = false;
+    }
   }
 
   function computeAccelerationsCPU(outAx, outAy) {
@@ -645,6 +688,8 @@
     }
     // 碰撞并合（动量守恒）
     mergePairs();
+    // 质量过大粒子坍缩消失（伴随动画）
+    collapseHeavyParticles();
 
     // Linking using grid（复用一次网格，按透明度分桶后批量描边）
     const { grid: grid2, cols, rows } = buildGrid();
@@ -712,6 +757,30 @@
       const dotA = (0.75 + 0.25 * alpha).toFixed(3);
       ctx.fillStyle = `rgba(255,255,255,${dotA})`;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Collapse effects
+    if (collapseEffects.length > 0) {
+      const rgb = CONFIG.lineColor || [255,255,255];
+      const prevComp = ctx.globalCompositeOperation;
+      if (CONFIG.collapseGlow) ctx.globalCompositeOperation = 'lighter';
+      const nowMs = now;
+      for (let i = collapseEffects.length - 1; i >= 0; i--) {
+        const eff = collapseEffects[i];
+        const t = (nowMs - eff.t0);
+        const k = 1 - Math.min(1, t / eff.dur); // 1..0
+        if (k <= 0) { collapseEffects.splice(i, 1); continue; }
+        const radius = Math.max(0.2, eff.r0 * Math.pow(k, 1.2));
+        const alpha = Math.max(0, CONFIG.collapseOpacity * Math.pow(k, 0.7));
+        // 实心渐隐球
+        ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
+        ctx.beginPath(); ctx.arc(eff.x, eff.y, radius, 0, Math.PI * 2); ctx.fill();
+        // 外层环（稍许发光效果）
+        ctx.strokeStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${(alpha*0.8).toFixed(3)})`;
+        ctx.lineWidth = Math.max(0.8, radius * 0.35);
+        ctx.beginPath(); ctx.arc(eff.x, eff.y, radius * 1.3, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.globalCompositeOperation = prevComp;
     }
 
     // Mouse comet trail (line-based, optional)
